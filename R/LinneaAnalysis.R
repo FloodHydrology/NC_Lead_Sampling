@@ -3,7 +3,7 @@ library(readxl)
 library(tidyverse)
 library(ggplot2)
 
-All <- read_excel("Documents/NC Wells/Final Databases/Pb in NC Database_6.22.22.xlsx", sheet = 4)
+All <- read_excel("C:/WorkspaceR/NC_Lead_Sampling/data/nc_database.xlsx", sheet = 3)
 Elements <- All[,2:18]
 Elements <- sapply(Elements,as.numeric)
 Elements <- data.frame(Elements)

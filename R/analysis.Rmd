@@ -1,0 +1,343 @@
+---
+title: "NC Lead Testing Study (Analysis)"
+author: "Linnea Wilson and Nate Jones"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: 
+  html_document:
+    toc: true # table of content true
+    toc_depth: 2  # upto three depths of headings (specified by #, ## and ###)
+    toc_float: true
+---
+
+The goal of this page is to present analyses conducted for our upcoming publication on lead testing in North Carolina. Please email Linnea or Nate if you have any questions!
+
+# Step 1: Setup workspace
+
+```{r, setup, warning=FALSE,message=FALSE,error=FALSE}
+
+#Clear Memory
+remove(list = ls())
+
+#load libraries of interest
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+
+#read data
+data_dir <- "C:/WorkspaceR/NC_Lead_Sampling/data/"
+df_names <- read_xlsx(
+              path = paste0(data_dir,"nc_database.xlsx"), 
+              sheet =2 , 
+              skip =1, 
+              n_max=1) %>% 
+            colnames()
+df <- read_xlsx(
+        path = paste0(data_dir,"nc_database.xlsx"), 
+        sheet = 2, 
+        skip=3, 
+        col_types = c('text',rep('numeric',17)),
+        col_names = df_names)
+```
+
+# Step 2: MRL handling
+
+First step -- we need to deal with values below the minimum reporting limit. The way the data is imported into the R environment, "\<MRL" is converted to NA. Thus, we just need to use a conditional statement that converts NA's to 1/2 the MRL.
+
+```{r, NAs, warning=FALSE, message=FALSE,error=FALSE}
+#Read MLR from datasheet
+mrl<-read_xlsx(
+        path = paste0(data_dir,"nc_database.xlsx"), 
+        sheet = 2, 
+        n_max = 1, 
+        col_types = c('text',rep('numeric',17)),
+        col_names = df_names) %>%  
+    pivot_longer(!Key, names_to="name", values_to = "mrl") %>% 
+    select(name, mrl)
+
+#Characterize the number of lead samples below 1ppb, 1-5 ppb, and >5ppb
+mrl_numbers <- df %>% 
+  pivot_longer(-Key) %>% 
+  filter(name == 'Pb') %>% 
+  mutate(
+     n_1   = if_else(is.na(value), 1, 0), 
+     n_1_5 = if_else(value>=1 & value<5, 1, 0),
+     n_5   = if_else(value>=5, 1, 0)) %>% 
+    group_by(name) %>% 
+    summarise(
+    n_1   = sum(n_1, na.rm = T),
+    n_1_5 = sum(n_1_5, na.rm = T),
+    n_5 = sum(n_5, na.rm = T)
+  )
+
+#Remove -9999 values from pH col
+df <- df %>% mutate(pH = if_else(pH<0, NA_real_, pH))
+
+#Now fill NAs with 1/2 the MRL value
+df <- df %>% 
+  pivot_longer(-Key) %>% 
+  left_join(., mrl) %>% 
+  mutate(value = if_else(is.na(value), mrl/2, value)) %>% 
+  select(-mrl) %>% 
+  pivot_wider(names_from = name, values_from = value)
+```
+
+## In-text calculations
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(mrl_numbers, caption = 'Number of lead samples below VT reporting limit (1 ppb), between VT and NC reporting limit (1-5ppb), and above the reporting imit (>5ppb)')
+```
+
+```{r echo = FALSE, results = 'asis'}
+PbX<-df %>% 
+  select(Pb, PbX) %>% 
+  mutate(count = if_else(PbX>Pb, 1, 0)) %>% 
+  summarise(sum = sum(count))
+knitr::kable(PbX, caption = 'Number of samples where PbX > Pb')
+```
+
+# Step 3: Summary stats
+
+```{r, summary stats, warning=FALSE, message=FALSE,error=FALSE}
+#Summon the tidyverse!
+summary_stats <- df %>% 
+  #convert to long format
+  pivot_longer(-Key) %>% 
+  #Group by name
+  group_by(name) %>% 
+  #calculate summary stats
+  summarise(
+    mean   = mean(value, na.rm = T), 
+    median = median(value, na.rm = T), 
+    max    = max(value, na.rm = T), 
+    min    = min(value, na.rm = T),
+    q90    = quantile(value, 0.9, na.rm = T)
+  ) 
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(summary_stats)
+```
+
+# Step 4: Fingerprinting
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Create function to run correlation
+corr_fun<-function(n){
+  
+  #Define variables of interest
+  var_1<-var$var_1[n]
+  var_2<-var$var_2[n]
+  
+  #Select variables of interest
+  temp <- df %>% select(var_1, var_2)
+  #Run cor test
+  temp <- cor.test(
+            x=as_vector(temp[,1]),
+            y=as_vector(temp[,2]), 
+            method = 'spearman')
+  
+  #Extract information of interest and export
+  tibble(
+    var_1, 
+    var_2, 
+    p_value = temp$p.value, 
+    rho = temp$estimate)
+}
+
+#Create tibble of variables to run correlation analysis on
+var<-tibble(
+  var_1 = c(rep("Pb", 5), rep('PbX', 6)), 
+  var_2 = c('Zn', 'Cu', 'Cd', 'Fe', 'Sn', "ZnX", "CuX", "pH", "CdX", "FeX", "SnX")
+)
+
+#Apply function to variable list
+rho_values <- 
+  lapply(
+    X = seq(1, nrow(var)), 
+    FUN = corr_fun) %>% 
+  bind_rows()
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(rho_values)
+```
+
+# Step 5: System Characteristics
+
+## Well construction
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#First, we need to download well construnction info
+well_info <- 
+  read_xlsx(
+    path = paste0(data_dir,"nc_database.xlsx"), 
+    sheet = 3)
+
+#now summarise by construction
+well_construction<-df %>% 
+  left_join(., well_info) %>% 
+  group_by(`System type`) %>% 
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  )
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_construction)
+```
+
+## Well Depth
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by depth
+well_depth <- df %>% 
+  left_join(., well_info) %>% 
+  group_by(`Catorgized well depth`) %>% 
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  )
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_depth)
+```
+
+## Geology
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#download location info
+location_info <- 
+  read_xlsx(
+    path = paste0(data_dir,"nc_database.xlsx"), 
+    sheet = 1)
+  
+#Summarise by geology
+well_geology<- df %>% 
+  left_join(., location_info) %>% 
+  group_by(Geology) %>% 
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  )
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_geology)
+```
+
+## Well construction and depth
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by well construction and depth
+well_con_dep <- df %>% 
+  left_join(., well_info) %>% 
+  group_by(`System type`,`Catorgized well depth`) %>% 
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  )
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_con_dep)
+```
+
+## Well construction and geology
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by well construction and geology
+well_con_geo <- df %>% 
+  left_join(., well_info) %>% 
+  left_join(., location_info) %>% 
+  group_by(Geology,`System type`) %>%   summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  ) 
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_con_geo)
+```
+
+## Well depth and geology
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by well depth and geology
+well_dep_geo <- df %>% 
+  left_join(., well_info) %>% 
+  left_join(., location_info) %>% 
+  group_by(Geology,`Catorgized well depth`) %>%   
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  ) 
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_dep_geo)
+```
+
+## Well construction, depth, and geology
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by well construction, depth, and geology
+well_con_dep_geo <- df %>% 
+  left_join(., well_info) %>% 
+  left_join(., location_info) %>% 
+  group_by(Geology,`System type`,`Catorgized well depth`) %>%   summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  ) 
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_con_dep_geo)
+```
+
+# Step 6: Demographics
+
+## Median Pb Levels
+
+```{r warning=FALSE, message=FALSE,error=FALSE}
+#Summarise by demographics
+well_demographics <- df %>% 
+  left_join(., well_info) %>% 
+  group_by(Race) %>%
+  summarise(
+    n_wells    = n(),
+    PbX_median = median(PbX), 
+    pH_median  = median(pH, na.rm=T)
+  ) 
+```
+
+```{r echo = FALSE, results = 'asis'}
+ knitr::kable(well_demographics)
+```
+
+## Comparative stats
+
+```{r echo=T, warning=F, message=F}
+#create vectors of white and bipoc PbX values
+BIPOC_PbX<-df %>% 
+    left_join(., well_info) %>% 
+    filter(Race =="BIPOC") %>% 
+    select(PbX) %>% 
+    as_vector()
+white_PbX<-df %>% 
+    left_join(., well_info) %>% 
+    filter(Race =="White") %>% 
+    select(PbX) %>% 
+    as_vector()
+
+#Run wilcox test
+wilcox.test(BIPOC_PbX, white_PbX)
+```
